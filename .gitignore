@@ -1,0 +1,5 @@
+invoice_settings.json
+__pycache__/
+*.pdf
+*.docx
+.DS_Store

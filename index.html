@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoice Maker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+<style>
+:root{--navy:#1f3755;--pale:#f1f5f9;--line:#d8e0e8;--muted:#475569}
+*{box-sizing:border-box}
+body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:0;background:#e9eef4;color:#1f2937}
+main{max-width:980px;margin:0 auto;padding:16px}
+h1{color:var(--navy);margin:8px 0 12px}
+fieldset{background:#fff;border:1px solid var(--line);border-radius:8px;margin:0 0 12px;padding:10px 14px 14px}
+legend{font-weight:600;color:var(--navy);padding:0 6px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+label{font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:3px}
+input,select{padding:7px;border:1px solid var(--line);border-radius:5px;font-size:14px;width:100%}
+button{background:var(--navy);color:#fff;border:0;border-radius:5px;padding:8px 14px;font-size:14px;cursor:pointer}
+button.alt{background:#64748b}button.del{background:#b91c1c}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.calc{font-weight:600;font-size:15px}
+.wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;background:#fff;font-size:14px}
+th{background:var(--navy);color:#fff;text-align:left;padding:8px}
+td{padding:8px;border-bottom:1px solid var(--line)}
+tbody tr{cursor:pointer}tbody tr.sel{background:#dbeafe}
+td.r,th.r{text-align:right}
+#totals{text-align:right;font-weight:700;margin:8px 4px 12px}
+.chk{flex-direction:row;align-items:center;gap:6px}.chk input{width:auto}
+</style>
+</head>
+<body>
+<main>
+<h1>Invoice Maker</h1>
+
+<fieldset><legend>Invoice details</legend>
+<div class="grid">
+<label>Invoice No.<input id="number"></label>
+<label>Bill To<input id="bill_to"></label>
+<label>Week Ending<input id="week" placeholder="dd/mm/yyyy"></label>
+<label>GST<select id="gst"><option>Included</option><option>Added (+10%)</option><option>None</option></select></label>
+</div>
+<div class="row"><button class="alt" id="autoWeek">Auto week ending (next Sunday)</button></div>
+</fieldset>
+
+<fieldset><legend>Add / edit work entry</legend>
+<div class="grid">
+<label>Date<input type="date" id="date"></label>
+<label>Start<input id="start" placeholder="6:00 AM"></label>
+<label>Finish<input id="finish" placeholder="2:00 PM"></label>
+<label>Break start<input id="bstart" placeholder="10:00 AM"></label>
+<label>Break end<input id="bend" placeholder="10:30 AM"></label>
+<label>Position<input id="position"></label>
+<label>Depot<input id="depot"></label>
+<label>Hourly rate ($)<input id="rate" inputmode="decimal"></label>
+</div>
+<div class="row">
+<label class="chk"><input type="checkbox" id="nobreak"> No break</label>
+<span class="calc">Hours: <span id="hours">-</span> &nbsp; Pay: <span id="pay">-</span></span>
+</div>
+<div class="row">
+<button id="add">Add</button><button class="alt" id="update">Update selected</button><button class="del" id="delete">Delete selected</button>
+</div>
+</fieldset>
+
+<div class="wrap"><table>
+<thead><tr><th>From-To</th><th>Start</th><th>Break</th><th>Finish</th><th>Hours</th><th>Position</th><th>Depot</th><th class="r">Total</th></tr></thead>
+<tbody id="rows"></tbody></table></div>
+<div id="totals"></div>
+
+<fieldset><legend>Your details (saved in this browser only)</legend>
+<div class="grid">
+<label>Name<input id="name"></label>
+<label>Address<input id="address"></label>
+<label>ABN<input id="abn"></label>
+<label>Bank<input id="bank"></label>
+<label>BSB<input id="bsb"></label>
+<label>Account<input id="acc"></label>
+</div>
+</fieldset>
+
+<div class="row">
+<button id="pdf">Export PDF</button>
+<button class="alt" id="print">Print</button>
+<button class="alt" id="newInv">New invoice (clear rows)</button>
+</div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const KEY = "invoice_maker_settings_v1";
+const DEF = {name:"", address:"", abn:"",
+  bank:"", bsb:"", acc:"", bill_to:"", position:"", depot:"",
+  start:"6:00 AM", finish:"2:00 PM", bstart:"10:00 AM", bend:"10:30 AM", nobreak:false,
+  rate:"30.00", gst:"Included", number:"001"};
+const SAVED = ["name","address","abn","bank","bsb","acc","bill_to","position","depot","start","finish","bstart","bend","rate","gst","number"];
+let rows = [], sel = null;
+
+function load(){ try{ return Object.assign({}, DEF, JSON.parse(localStorage.getItem(KEY)||"{}")); }catch(e){ return {...DEF}; } }
+function save(){ try{ const s={}; SAVED.forEach(k=>s[k]=$(k).value.trim()); s.nobreak=$("nobreak").checked; localStorage.setItem(KEY, JSON.stringify(s)); }catch(e){} }
+
+const money = x => "$" + x.toLocaleString("en-AU",{minimumFractionDigits:2,maximumFractionDigits:2});
+function parseTime(s){
+  const m = String(s).trim().replace(/\./g,"").match(/^(\d{1,2})(?::?(\d{2}))?\s*(am|pm)?$/i);
+  if(!m) return null;
+  let h = +m[1], mi = +(m[2]||0); const ap = (m[3]||"").toLowerCase();
+  if(mi>59) return null;
+  if(ap){ if(h<1||h>12) return null; h = h%12 + (ap==="pm"?12:0); } else if(h>23) return null;
+  return h*60+mi;
+}
+const fmtTime = t => { const h=Math.floor(t/60), m=t%60, ap=h>=12?"PM":"AM"; return `${(h%12)||12}:${String(m).padStart(2,"0")} ${ap}`; };
+function breakMins(bs,be,none){
+  if(none || (!bs.trim() && !be.trim())) return 0;
+  const s=parseTime(bs), e=parseTime(be); if(s===null||e===null) return null;
+  let m=e-s; if(m<0) m+=1440; return m;
+}
+function hoursWorked(st,fi,bm){
+  const s=parseTime(st), f=parseTime(fi); if(s===null||f===null||bm===null) return null;
+  let m=f-s; if(m<=0) m+=1440; m-=bm; return m>=0 ? m/60 : null;
+}
+const fmtDate = iso => { const [y,m,d]=iso.split("-"); return `${d}/${m}/${y}`; };
+const toIso = dmy => { const m=dmy.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/); if(!m) return null; const y=m[3].length===2?"20"+m[3]:m[3]; return `${y}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`; };
+
+function current(){
+  const nb=$("nobreak").checked, bm=breakMins($("bstart").value,$("bend").value,nb);
+  const h=hoursWorked($("start").value,$("finish").value,bm);
+  const rate=parseFloat($("rate").value.replace(/[$,]/g,""));
+  return {nb,bm,h,rate};
+}
+function updateCalc(){
+  const {h,rate}=current();
+  $("hours").textContent = h===null ? "-" : h.toFixed(2)+" h";
+  $("pay").textContent = (h===null||isNaN(rate)||rate<0) ? "-" : money(h*rate);
+}
+function readEntry(){
+  if(!$("date").value){ alert("Pick a date."); return null; }
+  const s=parseTime($("start").value), f=parseTime($("finish").value);
+  if(s===null||f===null){ alert("Enter times like 6:00 AM, 2:30 PM or 14:30."); return null; }
+  const {nb,bm,h,rate}=current();
+  if(bm===null){ alert("Enter valid break times, or tick 'No break'."); return null; }
+  if(h===null){ alert("The break is longer than the shift."); return null; }
+  if(isNaN(rate)||rate<0){ alert("Enter a valid hourly rate, e.g. 30.00"); return null; }
+  return {date:fmtDate($("date").value), start:fmtTime(s), bs:nb?"":fmtTime(parseTime($("bstart").value)),
+    be:nb?"":fmtTime(parseTime($("bend").value)), finish:fmtTime(f), pos:$("position").value.trim(),
+    depot:$("depot").value.trim(), rate, amt:Math.round(h*rate*100)/100};
+}
+function totals(){
+  const sub=rows.reduce((a,r)=>a+r.amt,0), mode=$("gst").value;
+  if(mode==="Added (+10%)"){ const g=Math.round(sub*10)/100; return {total:sub+g, gst:money(g)}; }
+  if(mode==="None") return {total:sub, gst:"N/A"};
+  return {total:sub, gst:"Included"};
+}
+function render(){
+  const tb=$("rows"); tb.innerHTML="";
+  let th=0;
+  rows.forEach((r,i)=>{
+    const bm=breakMins(r.bs,r.be,false), h=hoursWorked(r.start,r.finish,bm); th+=h||0;
+    const tr=document.createElement("tr"); if(i===sel) tr.className="sel";
+    [r.date,r.start,bm?bm+" min":"No break",r.finish,h===null?"-":h.toFixed(2)+" h",r.pos,r.depot,money(r.amt)].forEach((v,j)=>{
+      const td=document.createElement("td"); td.textContent=v; if(j===7) td.className="r"; tr.appendChild(td); });
+    tr.onclick=()=>select(i); tb.appendChild(tr);
+  });
+  const t=totals();
+  $("totals").textContent=`Hours: ${th.toFixed(2)}     GST: ${t.gst}     Total: ${money(t.total)}`;
+}
+function select(i){
+  sel=i; const r=rows[i];
+  $("date").value=toIso(r.date); $("start").value=r.start; $("finish").value=r.finish;
+  $("nobreak").checked=!r.bs && !r.be; if(r.bs) $("bstart").value=r.bs; if(r.be) $("bend").value=r.be;
+  $("position").value=r.pos; $("depot").value=r.depot; $("rate").value=r.rate.toFixed(2);
+  toggleBreak(); render();
+}
+function toggleBreak(){ const d=$("nobreak").checked; $("bstart").disabled=d; $("bend").disabled=d; updateCalc(); }
+function autoWeek(){
+  const ds=rows.map(r=>toIso(r.date)).concat($("date").value?[$("date").value]:[]).filter(Boolean).sort();
+  const base = ds.length ? new Date(ds[ds.length-1]+"T00:00:00") : new Date();
+  base.setDate(base.getDate() + (7 - base.getDay()) % 7);
+  $("week").value = `${String(base.getDate()).padStart(2,"0")}/${String(base.getMonth()+1).padStart(2,"0")}/${base.getFullYear()}`;
+}
+
+$("add").onclick=()=>{ const r=readEntry(); if(r){ rows.push(r); sel=null; if(!$("week").value) autoWeek(); render(); } };
+$("update").onclick=()=>{ if(sel===null){ alert("Click a row in the table first."); return; } const r=readEntry(); if(r){ rows[sel]=r; render(); } };
+$("delete").onclick=()=>{ if(sel!==null){ rows.splice(sel,1); sel=null; render(); } };
+$("autoWeek").onclick=autoWeek;
+$("nobreak").onchange=toggleBreak;
+["start","finish","bstart","bend","rate"].forEach(id=>$(id).addEventListener("input",updateCalc));
+$("gst").onchange=render;
+$("print").onclick=()=>window.print();
+$("newInv").onclick=()=>{
+  if(rows.length && !confirm("Clear all entries and move to the next invoice number?")) return;
+  const n=parseInt($("number").value,10); if(!isNaN(n)) $("number").value=String(n+1).padStart(3,"0");
+  rows=[]; sel=null; $("week").value=""; save(); render();
+};
+
+$("pdf").onclick=()=>{
+  if(!rows.length){ alert("Add at least one work entry first."); return; }
+  if(!window.jspdf){ alert("PDF library did not load. Check your internet connection."); return; }
+  if(!$("week").value.trim()) autoWeek();
+  const {jsPDF}=window.jspdf, doc=new jsPDF({unit:"mm",format:"a4"});
+  const navy=[31,55,85], pale=[241,245,249], W=210, L=17, R=W-17;
+  doc.setFont("helvetica","bold").setFontSize(26).setTextColor(...navy).text("INVOICE",L,26);
+  doc.setFontSize(11).setTextColor(31,41,55).text("Invoice No. "+$("number").value.trim(),L,34);
+
+  doc.setFillColor(...pale); doc.rect(L,40,82,20,"F"); doc.rect(L+84,40,82,20,"F");
+  doc.setFontSize(8).setTextColor(71,85,105);
+  doc.text("BILL TO",L+4,46); doc.text("PERIOD",L+88,46);
+  doc.setFontSize(11).setTextColor(31,41,55);
+  doc.text($("bill_to").value.trim(),L+4,54); doc.text("Week Ending "+$("week").value.trim(),L+88,54);
+
+  const body=rows.map(r=>[r.date,r.pos,r.depot,money(r.amt)]);
+  while(body.length<3) body.push(["","","",""]);
+  doc.autoTable({startY:68, head:[["FROM-TO","POSITION","DEPOT NAME:","TOTAL"]], body,
+    margin:{left:L,right:L}, theme:"grid",
+    headStyles:{fillColor:navy,textColor:255,fontSize:9},
+    styles:{fontSize:10,cellPadding:3.5,lineColor:[216,224,232]},
+    alternateRowStyles:{fillColor:[248,250,252]},
+    columnStyles:{3:{halign:"right",fontStyle:"bold"}}});
+
+  const t=totals(); let y=doc.lastAutoTable.finalY+8;
+  doc.setFillColor(232,238,245); doc.rect(R-70,y+9,70,10,"F");
+  doc.setDrawColor(216,224,232); doc.rect(R-70,y,70,19);
+  doc.setFontSize(10).setFont("helvetica","bold").setTextColor(31,41,55);
+  doc.text("GST",R-66,y+6.5); doc.text("TOTAL",R-66,y+15.5);
+  doc.setFont("helvetica","normal").text(t.gst,R-4,y+6.5,{align:"right"});
+  doc.setFont("helvetica","bold").text(money(t.total),R-4,y+15.5,{align:"right"});
+
+  y+=32; doc.setFontSize(11).setTextColor(...navy).text("Thank you for your business!",L,y);
+  y+=8; doc.setFillColor(...pale); doc.rect(L,y,82,26,"F"); doc.rect(L+84,y,82,26,"F");
+  doc.setFontSize(8).setTextColor(71,85,105);
+  doc.text("FROM",L+4,y+6); doc.text("PAYMENT DETAILS",L+88,y+6);
+  doc.setFontSize(10).setFont("helvetica","normal").setTextColor(31,41,55);
+  doc.text([$("name").value.trim(),$("address").value.trim(),"ABN: "+$("abn").value.trim()],L+4,y+12,{maxWidth:74});
+  doc.text([$("bank").value.trim(),"BSB: "+$("bsb").value.trim(),"Account: "+$("acc").value.trim()],L+88,y+12);
+  save();
+  doc.save(`Invoice${$("number").value.trim()}.pdf`);
+};
+
+(function init(){
+  const s=load();
+  SAVED.forEach(k=>$(k).value=s[k]); $("nobreak").checked=s.nobreak;
+  $("date").value=new Date().toISOString().slice(0,10);
+  SAVED.forEach(k=>$(k).addEventListener("change",save));
+  toggleBreak(); render();
+})();
+</script>
+</body>
+</html>
